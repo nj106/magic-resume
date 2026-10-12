@@ -1,0 +1,63 @@
+name: Sync upstream and build image
+
+# 每天北京时间 01:00 同步上游 JOYCEQL/magic-resume；有新提交就构建 arm64 镜像推到 GHCR，
+# 02:00 Watchtower 自动拉取更新。push 到 main 或手动触发也会构建。
+# （GITHUB_TOKEN 推送的同步提交不会触发 push 事件，所以同步和构建放在同一个 workflow 里。）
+on:
+  schedule:
+    - cron: '0 17 * * *'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+    steps:
+      - name: Merge upstream main into fork main
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          before=$(gh api repos/${{ github.repository }}/commits/main --jq .sha)
+          gh api repos/${{ github.repository }}/merge-upstream -f branch=main
+          after=$(gh api repos/${{ github.repository }}/commits/main --jq .sha)
+          if [ "$before" != "$after" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/nj106/magic-resume:latest
+            ghcr.io/nj106/magic-resume:${{ github.sha }}
